@@ -1,0 +1,5 @@
+config.ps1
+*.log
+*.zip
+models/
+node_modules/
