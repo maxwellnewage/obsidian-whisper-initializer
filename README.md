@@ -2,7 +2,7 @@
 
 **Fully local** speech-to-text for the [Obsidian Whisper plugin](https://github.com/nikdanilov/whisper-obsidian-plugin), running [whisper.cpp](https://github.com/ggerganov/whisper.cpp) on your own machine. No API key, and your audio never leaves your computer.
 
-One click on a desktop shortcut starts everything; closing the window shuts it down.
+One click on a desktop shortcut starts everything; closing the window shuts it down. Works on **Windows and Linux**.
 
 ## The problem this solves
 
@@ -28,6 +28,8 @@ The proxy also handles two details that otherwise ruin the experience:
 
 ## Requirements
 
+**Windows**
+
 | | |
 |---|---|
 | Windows | 10 or 11 |
@@ -36,37 +38,46 @@ The proxy also handles two details that otherwise ruin the experience:
 | ffmpeg | on your PATH (`winget install Gyan.FFmpeg`) |
 | whisper-server | see below |
 
+**Linux**
+
+| | |
+|---|---|
+| bash | any recent version |
+| Node.js | 18 or newer (`sudo apt install nodejs`) |
+| ffmpeg | `sudo apt install ffmpeg` |
+| whisper-server | see below |
+
 ## Setup
 
 ### 1. Download a whisper.cpp build
 
 Pick the build that matches your hardware. For **AMD GPUs**, the builds from [lemonade-sdk/whisper.cpp-rocm](https://github.com/lemonade-sdk/whisper.cpp-rocm/releases) bundle the ROCm runtimes, so there is no HIP SDK to install:
 
-| Hardware | Package |
-|---|---|
-| AMD RDNA4 (RX 9070 / 9060) | `whisper-*-windows-rocm-gfx120X.zip` |
-| AMD RDNA3 (RX 7900 / 7800, 780M iGPU) | `whisper-*-windows-rocm-gfx110X.zip` |
-| Ryzen AI 300 / MAX+ | `whisper-*-windows-rocm-gfx1150.zip` / `gfx1151` |
-| Any GPU (AMD, NVIDIA, Intel) | `whisper-*-windows-vulkan-x64.zip` |
-| No GPU | `whisper-*-windows-cpu-x64.zip` |
+| Hardware | Windows | Linux |
+|---|---|---|
+| AMD RDNA4 (RX 9070 / 9060) | `*-windows-rocm-gfx120X.zip` | `*-linux-rocm-gfx120X.tar.gz` |
+| AMD RDNA3 (RX 7900 / 7800, 780M iGPU) | `*-windows-rocm-gfx110X.zip` | `*-linux-rocm-gfx110X.tar.gz` |
+| Ryzen AI 300 / MAX+ | `*-windows-rocm-gfx1150.zip` / `gfx1151` | `*-linux-rocm-gfx1150.tar.gz` / `gfx1151` |
+| Any GPU (AMD, NVIDIA, Intel) | `*-windows-vulkan-x64.zip` | `*-linux-vulkan-x86_64.tar.gz` |
+| No GPU | `*-windows-cpu-x64.zip` | `*-linux-cpu-x86_64.tar.gz` |
 
 For **NVIDIA**, the [official whisper.cpp releases](https://github.com/ggerganov/whisper.cpp/releases) ship CUDA builds.
 
-Extract the zip anywhere, for example `C:\whisper-server\`, and check that it contains `whisper-server.exe`.
+Extract it anywhere — `C:\whisper-server\` on Windows, `~/whisper-server/` on Linux — and check that it contains `whisper-server.exe` (or `whisper-server` on Linux).
 
 ### 2. Download a model
 
 Grab one from [Hugging Face](https://huggingface.co/ggerganov/whisper.cpp/tree/main). Recommended: **`ggml-large-v3-turbo.bin`** (1.6 GB) — the best quality-to-speed ratio, and far better than the small models on non-English audio. If you are running on CPU and find it slow, try `ggml-base.bin` (148 MB).
 
-Put it in a `models\` folder inside the server directory.
+Put it in a `models` folder inside the server directory.
 
 ### 3. Configure
+
+**Windows**
 
 ```powershell
 copy config.example.ps1 config.ps1
 ```
-
-Edit `config.ps1` and point it at wherever you extracted the server:
 
 ```powershell
 $ServerDir = "C:\whisper-server"
@@ -74,16 +85,40 @@ $Model     = "models\ggml-large-v3-turbo.bin"
 $Idioma    = "es"                              # transcription language
 ```
 
+**Linux**
+
+```bash
+cp config.example.sh config.sh
+```
+
+```bash
+SERVER_DIR="$HOME/whisper-server"
+MODEL="models/ggml-large-v3-turbo.bin"
+IDIOMA="es"                                    # transcription language
+```
+
 ### 4. Start it
+
+**Windows**
 
 ```powershell
 pwsh -NoProfile -File .\start.ps1
 ```
 
+**Linux**
+
+```bash
+./start.sh
+```
+
 To get a one-click desktop shortcut:
 
 ```powershell
-pwsh -NoProfile -File .\crear-acceso-directo.ps1
+pwsh -NoProfile -File .\crear-acceso-directo.ps1     # Windows
+```
+
+```bash
+./crear-acceso-directo.sh                            # Linux (.desktop launcher)
 ```
 
 ### 5. Point the plugin at the proxy
@@ -109,7 +144,9 @@ On GPU, transcription is effectively instant.
 
 ## How the shutdown works
 
-`start.ps1` runs both services as children of its own console and binds them to a Windows **Job Object** with `KILL_ON_JOB_CLOSE`. Closing the window kills both, even on an abrupt close — the kernel guarantees it, rather than an event handler that might never get to run.
+On **Windows**, `start.ps1` runs both services as children of its own console and binds them to a **Job Object** with `KILL_ON_JOB_CLOSE`. Closing the window kills both, even on an abrupt close — the kernel guarantees it, rather than an event handler that might never get to run.
+
+On **Linux**, `start.sh` traps `EXIT`, `INT`, `TERM` and `HUP` and kills both children on the way out. It also exits if either service dies, so you never end up with half the stack running.
 
 ## Troubleshooting
 
@@ -127,7 +164,9 @@ On GPU, transcription is effectively instant.
 
 `proxy.js` reads these environment variables: `PORT`, `UPSTREAM`, `FFMPEG`, `WHISPER_LANG`. `start.ps1` fills them in from `config.ps1`.
 
-Note: the PowerShell scripts and their console output are in Spanish; the setting names above (`$ServerDir`, `$Model`, `$Idioma`) are the real variable names.
+On Linux, `start.sh` also sets `LD_LIBRARY_PATH` to the server directory, which the ROCm and Vulkan tarballs need in order to find their bundled `.so` files.
+
+Note: the scripts and their console output are in Spanish; the setting names above are the real variable names.
 
 ## Credits
 
