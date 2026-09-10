@@ -1,15 +1,15 @@
-# Copia este archivo como  config.sh  y ajusta las rutas a tu equipo.
-# config.sh no se sube al repositorio (esta en .gitignore).
+# Copy this file as  config.sh  and adjust the paths for your machine.
+# config.sh is not tracked by git (see .gitignore).
 
-# Carpeta donde extrajiste el build de whisper.cpp (la que contiene whisper-server).
+# Folder where you extracted the whisper.cpp build (the one holding whisper-server).
 SERVER_DIR="$HOME/whisper-server"
 
-# Ruta del modelo, relativa a SERVER_DIR (o absoluta si lo tienes en otro sitio).
+# Model path, relative to SERVER_DIR (or absolute if you keep it elsewhere).
 MODEL="models/ggml-large-v3-turbo.bin"
 
-# Idioma de las transcripciones: es, en, pt, fr...  ("auto" para detectarlo)
-IDIOMA="es"
+# Transcription language: en, es, pt, fr...  ("auto" to detect it)
+LANGUAGE="en"
 
-# Puertos. Solo cambialos si ya tienes algo ocupando el 8080 o el 8081.
-PUERTO_SERVER=8080
-PUERTO_PROXY=8081
+# Ports. Only change these if something already uses 8080 or 8081.
+SERVER_PORT=8080
+PROXY_PORT=8081

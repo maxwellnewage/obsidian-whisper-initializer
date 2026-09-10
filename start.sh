@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# Levanta whisper-server + el proxy transcodificador en esta misma terminal.
-# Ctrl+C o cerrar la terminal apaga ambos servicios.
+# Starts whisper-server and the transcoding proxy in this terminal.
+# Ctrl+C, or closing the terminal, shuts both services down.
 set -uo pipefail
 
-RAIZ="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# --- configuracion: valores por defecto, sobreescribibles en config.sh ---
-SERVER_DIR="$RAIZ/whisper-server"
+# --- configuration: defaults, overridable in config.sh ---
+SERVER_DIR="$ROOT/whisper-server"
 MODEL="models/ggml-large-v3-turbo.bin"
-IDIOMA="es"
-PUERTO_SERVER=8080
-PUERTO_PROXY=8081
+LANGUAGE="en"
+SERVER_PORT=8080
+PROXY_PORT=8081
 
-[ -f "$RAIZ/config.sh" ] && . "$RAIZ/config.sh"
+[ -f "$ROOT/config.sh" ] && . "$ROOT/config.sh"
 
 case "$MODEL" in
   /*) MODEL_PATH="$MODEL" ;;
@@ -24,108 +24,108 @@ LOG_OUT="$LOG_DIR/server-out.log"
 LOG_ERR="$LOG_DIR/server-err.log"
 PIDS=()
 
-verde()   { printf '\033[32m%s\033[0m\n' "$1"; }
-rojo()    { printf '\033[31m%s\033[0m\n' "$1"; }
-amarillo(){ printf '\033[33m%s\033[0m\n' "$1"; }
+green()  { printf '\033[32m%s\033[0m\n' "$1"; }
+red()    { printf '\033[31m%s\033[0m\n' "$1"; }
+yellow() { printf '\033[33m%s\033[0m\n' "$1"; }
 
-puerto_ocupado() { (echo > "/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1; }
+port_in_use() { (echo > "/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1; }
 
-limpiar() {
+cleanup() {
   trap - EXIT INT TERM HUP
   for pid in "${PIDS[@]:-}"; do
     [ -n "$pid" ] && kill "$pid" 2>/dev/null
   done
   wait 2>/dev/null
 }
-trap limpiar EXIT INT TERM HUP
+trap cleanup EXIT INT TERM HUP
 
 echo
-echo "   WHISPER LOCAL PARA OBSIDIAN"
-echo "   ==========================="
+echo "   LOCAL WHISPER FOR OBSIDIAN"
+echo "   =========================="
 echo
 
-# --- localizar el binario del servidor ---
+# --- locate the server binary ---
 SERVER_BIN=""
-for candidato in "$SERVER_DIR/whisper-server" "$SERVER_DIR/bin/whisper-server" "$SERVER_DIR/build/bin/whisper-server"; do
-  if [ -x "$candidato" ]; then SERVER_BIN="$candidato"; break; fi
+for candidate in "$SERVER_DIR/whisper-server" "$SERVER_DIR/bin/whisper-server" "$SERVER_DIR/build/bin/whisper-server"; do
+  if [ -x "$candidate" ]; then SERVER_BIN="$candidate"; break; fi
 done
 
-# --- comprobaciones previas ---
-fallos=()
-[ -n "$SERVER_BIN" ]        || fallos+=("no encuentro el ejecutable whisper-server en: $SERVER_DIR")
-[ -f "$MODEL_PATH" ]        || fallos+=("no encuentro el modelo: $MODEL_PATH")
-[ -f "$RAIZ/proxy.js" ]     || fallos+=("no encuentro proxy.js junto a este script")
-command -v node   >/dev/null 2>&1 || fallos+=("node no esta instalado (Node.js 18 o superior)")
-command -v ffmpeg >/dev/null 2>&1 || fallos+=("ffmpeg no esta instalado")
+# --- preflight checks ---
+problems=()
+[ -n "$SERVER_BIN" ]    || problems+=("cannot find the whisper-server executable in: $SERVER_DIR")
+[ -f "$MODEL_PATH" ]    || problems+=("cannot find the model: $MODEL_PATH")
+[ -f "$ROOT/proxy.js" ] || problems+=("cannot find proxy.js next to this script")
+command -v node   >/dev/null 2>&1 || problems+=("node is not installed (Node.js 18 or newer)")
+command -v ffmpeg >/dev/null 2>&1 || problems+=("ffmpeg is not installed")
 
-if [ ${#fallos[@]} -gt 0 ]; then
-  rojo "   No puedo arrancar:"
-  for f in "${fallos[@]}"; do rojo "     - $f"; done
-  if [ ! -f "$RAIZ/config.sh" ]; then
+if [ ${#problems[@]} -gt 0 ]; then
+  red "   Cannot start:"
+  for p in "${problems[@]}"; do red "     - $p"; done
+  if [ ! -f "$ROOT/config.sh" ]; then
     echo
-    amarillo "   Parece que aun no configuraste las rutas."
-    echo "   Copia config.example.sh como config.sh y edita SERVER_DIR."
+    yellow "   Looks like you haven't configured your paths yet."
+    echo "   Copy config.example.sh to config.sh and set SERVER_DIR."
   fi
   exit 1
 fi
 
-if puerto_ocupado "$PUERTO_SERVER" || puerto_ocupado "$PUERTO_PROXY"; then
-  amarillo "   Ya hay servicios escuchando en $PUERTO_SERVER/$PUERTO_PROXY."
-  echo "   No arranco otra copia para no chocar de puerto."
+if port_in_use "$SERVER_PORT" || port_in_use "$PROXY_PORT"; then
+  yellow "   Something is already listening on $SERVER_PORT/$PROXY_PORT."
+  echo "   Not starting a second copy, to avoid a port clash."
   echo
-  verde "   URL para Obsidian:  http://localhost:$PUERTO_PROXY/inference"
+  green "   URL for Obsidian:  http://localhost:$PROXY_PORT/inference"
   exit 0
 fi
 
 mkdir -p "$LOG_DIR"
 
-# los builds ROCm/Vulkan traen sus .so junto al binario
+# the ROCm and Vulkan tarballs ship their .so files next to the binary
 export LD_LIBRARY_PATH="$(dirname "$SERVER_BIN"):$SERVER_DIR:${LD_LIBRARY_PATH:-}"
 
-printf '   Cargando el modelo (unos segundos)...'
-"$SERVER_BIN" -m "$MODEL_PATH" --port "$PUERTO_SERVER" -l "$IDIOMA" >"$LOG_OUT" 2>"$LOG_ERR" &
+printf '   Loading the model (a few seconds)...'
+"$SERVER_BIN" -m "$MODEL_PATH" --port "$SERVER_PORT" -l "$LANGUAGE" >"$LOG_OUT" 2>"$LOG_ERR" &
 PIDS+=($!)
 SERVER_PID=${PIDS[0]}
 
-inicio=$(date +%s)
-while ! puerto_ocupado "$PUERTO_SERVER"; do
+started=$(date +%s)
+while ! port_in_use "$SERVER_PORT"; do
   if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-    echo " fallo."
+    echo " failed."
     echo
-    rojo "   El servidor murio al arrancar. Ultimas lineas del log:"
+    red "   The server died on startup. Last lines of the log:"
     tail -n 12 "$LOG_ERR" 2>/dev/null | sed 's/^/     /'
     exit 1
   fi
-  if [ $(( $(date +%s) - inicio )) -gt 120 ]; then
-    echo " fallo."
-    rojo "   El servidor no respondio en 120 segundos."
+  if [ $(( $(date +%s) - started )) -gt 120 ]; then
+    echo " failed."
+    red "   The server did not respond within 120 seconds."
     exit 1
   fi
   sleep 0.4
 done
-verde " listo."
+green " ready."
 
-cd "$RAIZ"
-PORT="$PUERTO_PROXY" UPSTREAM="http://127.0.0.1:$PUERTO_SERVER" WHISPER_LANG="$IDIOMA" node proxy.js &
+cd "$ROOT"
+PORT="$PROXY_PORT" UPSTREAM="http://127.0.0.1:$SERVER_PORT" WHISPER_LANG="$LANGUAGE" node proxy.js &
 PIDS+=($!)
 sleep 1
 
 echo
-echo "   Servidor  :  http://127.0.0.1:$PUERTO_SERVER"
-echo "   Proxy     :  http://127.0.0.1:$PUERTO_PROXY"
+echo "   Server :  http://127.0.0.1:$SERVER_PORT"
+echo "   Proxy  :  http://127.0.0.1:$PROXY_PORT"
 echo
-verde "   URL para Obsidian:  http://localhost:$PUERTO_PROXY/inference"
+green "   URL for Obsidian:  http://localhost:$PROXY_PORT/inference"
 echo
-echo "   Ctrl+C (o cerrar esta terminal) apaga todo."
+echo "   Ctrl+C, or closing this terminal, shuts everything down."
 echo "   ------------------------------------------------------------"
 echo
 
-# espera hasta que alguno muera; el trap se encarga del resto
+# wait until one of them dies; the trap takes care of the rest
 while :; do
   for pid in "${PIDS[@]}"; do
     if ! kill -0 "$pid" 2>/dev/null; then
       echo
-      amarillo "   Un servicio se detuvo. Apagando el resto..."
+      yellow "   A service stopped. Shutting down the rest..."
       exit 1
     fi
   done

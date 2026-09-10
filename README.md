@@ -82,7 +82,7 @@ copy config.example.ps1 config.ps1
 ```powershell
 $ServerDir = "C:\whisper-server"
 $Model     = "models\ggml-large-v3-turbo.bin"
-$Idioma    = "es"                              # transcription language
+$Language  = "en"                              # transcription language
 ```
 
 **Linux**
@@ -94,7 +94,7 @@ cp config.example.sh config.sh
 ```bash
 SERVER_DIR="$HOME/whisper-server"
 MODEL="models/ggml-large-v3-turbo.bin"
-IDIOMA="es"                                    # transcription language
+LANGUAGE="en"                                  # transcription language
 ```
 
 ### 4. Start it
@@ -114,11 +114,11 @@ pwsh -NoProfile -File .\start.ps1
 To get a one-click desktop shortcut:
 
 ```powershell
-pwsh -NoProfile -File .\crear-acceso-directo.ps1     # Windows
+pwsh -NoProfile -File .\create-shortcut.ps1     # Windows
 ```
 
 ```bash
-./crear-acceso-directo.sh                            # Linux (.desktop launcher)
+./create-shortcut.sh                            # Linux (.desktop launcher)
 ```
 
 ### 5. Point the plugin at the proxy
@@ -133,7 +133,7 @@ Leave the API key empty. That's it.
 
 ## Performance
 
-Measured on 23 seconds of Spanish audio with large-v3-turbo:
+Measured on 23 seconds of speech with large-v3-turbo:
 
 | | Time | Speed |
 |---|---|---|
@@ -165,8 +165,6 @@ On **Linux**, `start.sh` traps `EXIT`, `INT`, `TERM` and `HUP` and kills both ch
 `proxy.js` reads these environment variables: `PORT`, `UPSTREAM`, `FFMPEG`, `WHISPER_LANG`. `start.ps1` fills them in from `config.ps1`.
 
 On Linux, `start.sh` also sets `LD_LIBRARY_PATH` to the server directory, which the ROCm and Vulkan tarballs need in order to find their bundled `.so` files.
-
-Note: the scripts and their console output are in Spanish; the setting names above are the real variable names.
 
 ## Credits
 
