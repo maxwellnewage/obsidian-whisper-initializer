@@ -13,3 +13,11 @@ LANGUAGE="en"
 # Ports. Only change these if something already uses 8080 or 8081.
 SERVER_PORT=8080
 PROXY_PORT=8081
+
+# Seconds of silence after which the server is stopped and the model leaves
+# VRAM. The next recording starts it again. 0 keeps it loaded forever.
+IDLE_TIMEOUT=900
+
+# Load the model at startup instead of waiting for the first recording. Worth
+# turning on if you transcribe on CPU, where a cold start is slow.
+PRELOAD=false

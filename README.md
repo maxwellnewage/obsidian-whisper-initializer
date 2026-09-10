@@ -2,7 +2,7 @@
 
 **Fully local** speech-to-text for the [Obsidian Whisper plugin](https://github.com/nikdanilov/whisper-obsidian-plugin), running [whisper.cpp](https://github.com/ggerganov/whisper.cpp) on your own machine. No API key, and your audio never leaves your computer.
 
-One click on a desktop shortcut starts everything; closing the window shuts it down. Works on **Windows and Linux**.
+One click on a desktop shortcut starts everything; closing the window shuts it down. The model is only loaded while you are actually dictating, so it does not hold onto your VRAM all day. Works on **Windows and Linux**.
 
 ## The problem this solves
 
@@ -25,6 +25,8 @@ The proxy also handles two details that otherwise ruin the experience:
 
 - The plugin sends `language: ""` when no language is selected, and that empty field makes the server fail. The proxy strips it and injects the configured language instead.
 - Some server versions return the transcription split into segments joined by newlines, breaking even mid-word (`ver\nificar`). The proxy requests `split_on_word` and returns flowing text. The `srt` and `vtt` formats are passed through untouched, since there the line breaks are structural.
+
+Because the proxy sees every request, it is also what decides when the server needs to be running at all — see [When the model is loaded](#when-the-model-is-loaded).
 
 ## Requirements
 
@@ -80,9 +82,10 @@ copy config.example.ps1 config.ps1
 ```
 
 ```powershell
-$ServerDir = "C:\whisper-server"
-$Model     = "models\ggml-large-v3-turbo.bin"
-$Language  = "en"                              # transcription language
+$ServerDir   = "C:\whisper-server"
+$Model       = "models\ggml-large-v3-turbo.bin"
+$Language    = "en"                            # transcription language
+$IdleTimeout = 900                             # unload the model after 15 min idle
 ```
 
 **Linux**
@@ -95,6 +98,7 @@ cp config.example.sh config.sh
 SERVER_DIR="$HOME/whisper-server"
 MODEL="models/ggml-large-v3-turbo.bin"
 LANGUAGE="en"                                  # transcription language
+IDLE_TIMEOUT=900                               # unload the model after 15 min idle
 ```
 
 ### 4. Start it
@@ -142,11 +146,34 @@ Measured on 23 seconds of speech with large-v3-turbo:
 
 On GPU, transcription is effectively instant.
 
+Loading the model adds about a second on GPU and a few on CPU, and only on the first recording after an idle period.
+
+## When the model is loaded
+
+`large-v3-turbo` takes roughly 2 GB of VRAM, and whisper.cpp holds it for as long as the server process lives. Keeping that resident all day so you can dictate twice is a poor trade, so the two processes have very different lifetimes:
+
+- The **proxy** runs the whole time. It is an idle Node process: a few tens of MB of RAM, no VRAM, no GPU context.
+- The **server** is started by the proxy on your first recording, and stopped again after `IDLE_TIMEOUT` seconds without a transcription. The model leaves memory; the next recording brings it back.
+
+The launcher script does not start the server at all any more — it only starts the proxy and hands it the paths it needs.
+
+A cold start costs the model load, which the proxy overlaps with the ffmpeg transcode so you pay the longer of the two rather than the sum. On a GPU that is a second or two; on CPU it is slower, and `PRELOAD=true` (`$Preload = $true` on Windows) restores the old behaviour of loading at startup. `IDLE_TIMEOUT=0` keeps the model loaded once it is up.
+
 ## How the shutdown works
 
-On **Windows**, `start.ps1` runs both services as children of its own console and binds them to a **Job Object** with `KILL_ON_JOB_CLOSE`. Closing the window kills both, even on an abrupt close — the kernel guarantees it, rather than an event handler that might never get to run.
+The proxy owns the server process, so there is one place that has to get this right rather than two.
 
-On **Linux**, `start.sh` traps `EXIT`, `INT`, `TERM` and `HUP` and kills both children on the way out. It also exits if either service dies, so you never end up with half the stack running.
+On **Windows**, `start.ps1` runs the proxy as a child of its own console and binds it to a **Job Object** with `KILL_ON_JOB_CLOSE`. Job membership is inherited, so the server the proxy spawns lands in the same job. Closing the window kills both, even on an abrupt close — the kernel guarantees it, rather than an event handler that might never get to run.
+
+On **Linux**, `start.sh` `exec`s into Node, so the proxy *is* the process the terminal owns; there is no shell in between to lose track of anything. It handles `SIGINT`, `SIGTERM` and `SIGHUP` by stopping the server (`SIGTERM`, then `SIGKILL` after 5 s) before exiting.
+
+That leaves one gap that no handler can close: `SIGKILL` on the proxy itself, or a hard logout. The server would survive as an orphan holding VRAM. So the proxy writes its server's pid to `whisper-server.pid` in the log directory, and on the next start:
+
+- if that pid is alive and serving the port, it **adopts** it instead of failing on a port collision — and it is then subject to the idle timeout like any other,
+- if the pid is alive but no longer listening, it is **reaped**,
+- if something else is on the port, the proxy uses it but never kills it, since it is not ours to manage.
+
+The launcher only refuses to start when the *proxy* port is taken, and it tells apart another copy of itself (`GET /health` reports `whisper-proxy`) from an unrelated program, which are two different problems with two different fixes.
 
 ## Troubleshooting
 
@@ -160,9 +187,29 @@ On **Linux**, `start.sh` traps `EXIT`, `INT`, `TERM` and `HUP` and kills both ch
 
 **It won't start and mentions `config.ps1`** — step 3 is missing.
 
+**The first recording after a while takes a couple of seconds longer** — that is the model being loaded again after the idle timeout. Raise `IDLE_TIMEOUT`, set it to `0`, or turn on `PRELOAD`.
+
+**`Port 8081 is taken by something that is not this proxy`** — some other program has the port. Change `PROXY_PORT` in your config (and the URL in Obsidian to match).
+
 ## Advanced configuration
 
-`proxy.js` reads these environment variables: `PORT`, `UPSTREAM`, `FFMPEG`, `WHISPER_LANG`. `start.ps1` fills them in from `config.ps1`.
+`proxy.js` reads these environment variables, and the launcher scripts fill them in from your config file:
+
+| | |
+|---|---|
+| `PORT` | port the proxy listens on (8081) |
+| `UPSTREAM` | where the server is (`http://127.0.0.1:8080`) |
+| `FFMPEG` | ffmpeg binary (`ffmpeg`) |
+| `WHISPER_LANG` | language passed to the server (`en`) |
+| `WHISPER_BIN` | server executable — **unset it to manage the server yourself** |
+| `WHISPER_MODEL` | model passed to `-m` |
+| `WHISPER_DIR` | working directory for the server |
+| `WHISPER_IDLE_TIMEOUT` | seconds of silence before unloading, `0` to never (900) |
+| `WHISPER_START_TIMEOUT` | seconds to wait for the model to load (120) |
+| `WHISPER_PRELOAD` | `1` to load at startup instead of on demand |
+| `WHISPER_LOG_DIR` | server logs and pid file (`$TMPDIR/obsidian-whisper-local`) |
+
+Without `WHISPER_BIN` and `WHISPER_MODEL`, or with a non-loopback `UPSTREAM`, the proxy manages nothing and just forwards to whatever is already listening — which is what you want if you run the server under systemd or on another machine.
 
 On Linux, `start.sh` also sets `LD_LIBRARY_PATH` to the server directory, which the ROCm and Vulkan tarballs need in order to find their bundled `.so` files.
 

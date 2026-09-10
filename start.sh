@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Starts whisper-server and the transcoding proxy in this terminal.
-# Ctrl+C, or closing the terminal, shuts both services down.
+# Starts the transcoding proxy in this terminal. The proxy starts whisper-server
+# by itself on the first transcription, and stops it again after IDLE_TIMEOUT
+# seconds of silence, so the model is not sitting in VRAM while you are not
+# dictating.
+# Ctrl+C, or closing the terminal, shuts everything down.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,6 +14,8 @@ MODEL="models/ggml-large-v3-turbo.bin"
 LANGUAGE="en"
 SERVER_PORT=8080
 PROXY_PORT=8081
+IDLE_TIMEOUT=900
+PRELOAD=false
 
 [ -f "$ROOT/config.sh" ] && . "$ROOT/config.sh"
 
@@ -20,9 +25,6 @@ case "$MODEL" in
 esac
 
 LOG_DIR="${TMPDIR:-/tmp}/obsidian-whisper-local"
-LOG_OUT="$LOG_DIR/server-out.log"
-LOG_ERR="$LOG_DIR/server-err.log"
-PIDS=()
 
 green()  { printf '\033[32m%s\033[0m\n' "$1"; }
 red()    { printf '\033[31m%s\033[0m\n' "$1"; }
@@ -30,14 +32,16 @@ yellow() { printf '\033[33m%s\033[0m\n' "$1"; }
 
 port_in_use() { (echo > "/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1; }
 
-cleanup() {
-  trap - EXIT INT TERM HUP
-  for pid in "${PIDS[@]:-}"; do
-    [ -n "$pid" ] && kill "$pid" 2>/dev/null
-  done
-  wait 2>/dev/null
+# The proxy answers any GET with a JSON body naming itself, which tells it apart
+# from whatever else might be holding the port.
+proxy_health() {
+  {
+    exec 3<>"/dev/tcp/127.0.0.1/$PROXY_PORT" || return 1
+    printf 'GET /health HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3
+    cat <&3
+    exec 3<&-
+  } 2>/dev/null
 }
-trap cleanup EXIT INT TERM HUP
 
 echo
 echo "   LOCAL WHISPER FOR OBSIDIAN"
@@ -69,12 +73,19 @@ if [ ${#problems[@]} -gt 0 ]; then
   exit 1
 fi
 
-if port_in_use "$SERVER_PORT" || port_in_use "$PROXY_PORT"; then
-  yellow "   Something is already listening on $SERVER_PORT/$PROXY_PORT."
-  echo "   Not starting a second copy, to avoid a port clash."
-  echo
-  green "   URL for Obsidian:  http://localhost:$PROXY_PORT/inference"
-  exit 0
+# A second copy would only fight the first one for the port. The server port is
+# not checked here: the proxy adopts or reaps whatever it finds on it.
+if port_in_use "$PROXY_PORT"; then
+  if proxy_health | grep -q whisper-proxy; then
+    yellow "   The proxy is already running on port $PROXY_PORT."
+    echo "   Nothing to do — this window can be closed."
+    echo
+    green "   URL for Obsidian:  http://localhost:$PROXY_PORT/inference"
+    exit 0
+  fi
+  red "   Port $PROXY_PORT is taken by something that is not this proxy."
+  echo "   Stop it, or set a different PROXY_PORT in config.sh."
+  exit 1
 fi
 
 mkdir -p "$LOG_DIR"
@@ -82,37 +93,16 @@ mkdir -p "$LOG_DIR"
 # the ROCm and Vulkan tarballs ship their .so files next to the binary
 export LD_LIBRARY_PATH="$(dirname "$SERVER_BIN"):$SERVER_DIR:${LD_LIBRARY_PATH:-}"
 
-printf '   Loading the model (a few seconds)...'
-"$SERVER_BIN" -m "$MODEL_PATH" --port "$SERVER_PORT" -l "$LANGUAGE" >"$LOG_OUT" 2>"$LOG_ERR" &
-PIDS+=($!)
-SERVER_PID=${PIDS[0]}
-
-started=$(date +%s)
-while ! port_in_use "$SERVER_PORT"; do
-  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-    echo " failed."
-    echo
-    red "   The server died on startup. Last lines of the log:"
-    tail -n 12 "$LOG_ERR" 2>/dev/null | sed 's/^/     /'
-    exit 1
-  fi
-  if [ $(( $(date +%s) - started )) -gt 120 ]; then
-    echo " failed."
-    red "   The server did not respond within 120 seconds."
-    exit 1
-  fi
-  sleep 0.4
-done
-green " ready."
-
-cd "$ROOT"
-PORT="$PROXY_PORT" UPSTREAM="http://127.0.0.1:$SERVER_PORT" WHISPER_LANG="$LANGUAGE" node proxy.js &
-PIDS+=($!)
-sleep 1
-
-echo
-echo "   Server :  http://127.0.0.1:$SERVER_PORT"
 echo "   Proxy  :  http://127.0.0.1:$PROXY_PORT"
+if [ "$PRELOAD" = true ]; then
+  echo "   Server :  starting now, on port $SERVER_PORT"
+else
+  echo "   Server :  starts on your first recording, on port $SERVER_PORT"
+fi
+if [ "$IDLE_TIMEOUT" -gt 0 ]; then
+  if [ "$IDLE_TIMEOUT" -ge 60 ]; then idle_for="$((IDLE_TIMEOUT / 60)) min"; else idle_for="$IDLE_TIMEOUT s"; fi
+  echo "             and stops again after $idle_for without dictation"
+fi
 echo
 green "   URL for Obsidian:  http://localhost:$PROXY_PORT/inference"
 echo
@@ -120,14 +110,17 @@ echo "   Ctrl+C, or closing this terminal, shuts everything down."
 echo "   ------------------------------------------------------------"
 echo
 
-# wait until one of them dies; the trap takes care of the rest
-while :; do
-  for pid in "${PIDS[@]}"; do
-    if ! kill -0 "$pid" 2>/dev/null; then
-      echo
-      yellow "   A service stopped. Shutting down the rest..."
-      exit 1
-    fi
-  done
-  sleep 1
-done
+# exec: node becomes this process, so it receives Ctrl+C and the terminal's
+# HUP directly, and there is no shell left in between to lose track of it.
+cd "$ROOT"
+exec env \
+  PORT="$PROXY_PORT" \
+  UPSTREAM="http://127.0.0.1:$SERVER_PORT" \
+  WHISPER_LANG="$LANGUAGE" \
+  WHISPER_BIN="$SERVER_BIN" \
+  WHISPER_MODEL="$MODEL_PATH" \
+  WHISPER_DIR="$SERVER_DIR" \
+  WHISPER_IDLE_TIMEOUT="$IDLE_TIMEOUT" \
+  WHISPER_LOG_DIR="$LOG_DIR" \
+  WHISPER_PRELOAD="$([ "$PRELOAD" = true ] && echo 1 || echo 0)" \
+  node proxy.js
